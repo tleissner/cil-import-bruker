@@ -29,7 +29,7 @@ from cil.framework import AcquisitionGeometry
 
 
 
-def set_geometry(infofile,logfile):
+def set_geometry(logfile,infofile=None):
     """
     Creates a CIL AcquisitionGeometry object for a cone-beam CT scan.
 
@@ -41,11 +41,15 @@ def set_geometry(infofile,logfile):
         AcquisitionGeometry: A geometry object representing the scan setup.
     """
 
-    # Get angles in degrees and radians
-    theta_deg, theta_rad = get_angles_deg(infofile)
-
     # Extract scan parameters from the log file
     scanparams = get_scanparams(logfile)
+
+    # Get angles in degrees and radians
+    if infofile:
+        theta_deg, theta_rad = get_angles_from_infofile(infofile)
+    else: 
+        theta_deg, theta_rad = get_angles_from_logfile(scanparams)
+
 
     # Calculate distances
     distance_source_origin = float(scanparams['Acquisition']['object_to_source_(mm)'])
@@ -67,7 +71,26 @@ def set_geometry(infofile,logfile):
 
 
 
-def get_angles_deg(infofile, startangle=0):
+
+def get_angles_from_logfile(scanparams):
+    """
+    Calculates angles in degrees from the information in the log file.
+
+    Args:
+        logfile (str): Path to the log file.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: A tuple containing two arrays:
+            - First array: Angles in degrees.
+            - Second array: Angles converted to radians.
+    """
+    angles_deg = [ i*float(scanparams['Acquisition']['rotation_step_(deg)']) for i in range(int(scanparams['Acquisition']['number_of_files'])) ]
+    return np.array(angles_deg), np.deg2rad(angles_deg)
+
+
+
+
+def get_angles_from_infofile(infofile, startangle=0):
     """
     Extracts angles in degrees from an information file.
 
