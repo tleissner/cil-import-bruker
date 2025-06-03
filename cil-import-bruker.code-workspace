@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../CIL-User-Showcase"
+		},
+		{
+			"path": "../CIL-User-Showcase-fork"
 		}
 	],
 	"settings": {}

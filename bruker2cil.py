@@ -23,10 +23,10 @@
 import numpy as np
 import glob
 import os
+import pandas as pd
 
 ### Import all CIL components needed
 from cil.framework import AcquisitionGeometry
-
 
 
 def set_geometry(logfile,infofile=None):
@@ -88,8 +88,6 @@ def get_angles_from_logfile(scanparams):
     return np.array(angles_deg), np.deg2rad(angles_deg)
 
 
-
-
 def get_angles_from_infofile(infofile, startangle=0):
     """
     Extracts angles in degrees from an information file.
@@ -118,6 +116,32 @@ def get_angles_from_infofile(infofile, startangle=0):
     return np.array(angles_deg), np.deg2rad(angles_deg)
 
 
+def get_reference_angles_from_infofile(infofile, startangle=0):
+    """
+    Extracts angles in degrees from an information file, starting after the
+    "Drift compensation scan" line.
+
+    Args:
+        infofile (str): Path to the information file.
+        startangle (float, optional): Starting angle in degrees (default is 0).
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: A tuple containing two arrays:
+            - First array: Angles in degrees.
+            - Second array: Angles converted to radians.
+    """
+    angles_deg = [startangle]
+    start_collecting = False
+    with open(infofile, "r") as f:
+        for line in f:
+            line = line.strip()
+            if 'Drift compensation scan' in line:
+                start_collecting = True
+                continue
+            if start_collecting and 'achieved angle' in line:
+                angles_deg.append(float(line.strip().rsplit(' ',1)[-1][:-1]))
+    return np.array(angles_deg), np.deg2rad(angles_deg)
+
 
 def get_scanparams(logfile):
     """
@@ -145,7 +169,7 @@ def get_scanparams(logfile):
         return scanparams
         
 
-def get_filelist(datadir,dataset_prefix,num_digits=8):
+def get_filelist(datadir,dataset_prefix,num_digits=8,extension='tif'):
     """
     Retrieves a sorted list of file paths matching a specific pattern.
 
@@ -157,7 +181,7 @@ def get_filelist(datadir,dataset_prefix,num_digits=8):
     Returns:
         List[str]: A sorted list of file paths matching the specified pattern.
     """
-    return sorted(glob.glob(datadir+'/'+dataset_prefix+('[0-9]' * num_digits)+'.tif'))
+    return sorted(glob.glob(datadir+'/'+dataset_prefix+('[0-9]' * num_digits)+'.'+extension))
 
 
 
