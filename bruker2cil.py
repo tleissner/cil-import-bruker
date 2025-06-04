@@ -24,6 +24,16 @@ import numpy as np
 import glob
 import os
 import pandas as pd
+import matplotlib.pyplot as plt
+
+### Import modules for image processing
+from skimage.registration import phase_cross_correlation
+from scipy.ndimage import shift
+import imageio
+
+### Parallel computing
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 
 ### Import all CIL components needed
 from cil.framework import AcquisitionGeometry
@@ -193,3 +203,117 @@ def rename_files(directory, old_prefix, new_prefix):
             os.rename(os.path.join(directory, filename), os.path.join(directory, new_name))
 
 
+### Thermal drift alignment functions
+def shift_and_save_star(args):
+    return shift_and_save(*args)
+
+def shift_and_save(index, image, shift_x, shift_y, output_dir, output_prefix):
+    shifted = shift(image, (shift_y, shift_x))
+    filename = os.path.join(output_dir, f"{output_prefix}{index:04d}.tiff")
+    imageio.imwrite(filename, shifted.astype(np.uint16))
+    return index, shifted  # To reconstruct the new stack in order
+
+def align_projection_stack(
+    proj,                          # Projection stack object with .as_array() and .fill()
+    infofile,                     # Path to infofile for angle extraction
+    datadir,                      # Directory containing raw data files
+    dataset_prefix,               # Prefix for raw dataset filenames
+    filelist,                     # List of raw projection filenames (ordered)
+    output_dir,                   # Directory to save shifted .tiff images
+    output_prefix="aligned_",     # Prefix for saved .tiff images
+    exact_match=False             # Match angles exactly or within half-step tolerance
+):
+    # --- Ensure output directory exists ---
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --- Load angles and filenames ---
+    corr_angles_deg, _ = get_reference_angles_from_infofile(infofile, startangle=0)
+    corr_filelist = get_filelist(datadir, dataset_prefix, num_digits=8, extension="iif")
+    theta_deg, _ = get_angles_from_infofile(infofile)
+
+    df_proj = pd.DataFrame({'filename': filelist, 'angle': theta_deg})
+    df_corr = pd.DataFrame({'filename': corr_filelist, 'angle': corr_angles_deg})
+
+    # --- Determine matching tolerance ---
+    tolerance = 0 if exact_match else (df_proj["angle"].iloc[1] - df_proj["angle"].iloc[0]) / 2
+
+    # --- Match projection and correction images by angle ---
+    df_proj['key'] = df_corr['key'] = 1
+    merged = pd.merge(df_proj, df_corr, on='key', suffixes=('_proj', '_corr')).drop('key', axis=1)
+    matched = merged[np.abs(merged['angle_proj'] - merged['angle_corr']) <= tolerance].reset_index(drop=True)
+
+    # --- Plot differences ---
+    n = int(np.ceil(np.sqrt(len(matched))))
+    fig, axes = plt.subplots(n, n, figsize=(n * 2, n * 2))
+    axes = axes.flatten()
+
+    shifts_x, shifts_y = [], []
+    for i, row in matched.iterrows():
+        img_pre = imageio.v2.imread(row['filename_proj'])
+        img_post = imageio.v2.imread(row['filename_corr'])
+
+        diff = img_post.astype(float) - img_pre.astype(float)
+        axes[i].imshow(diff, cmap='seismic', vmin=-np.max(np.abs(diff)), vmax=np.max(np.abs(diff)))
+        axes[i].axis('off')
+        axes[i].set_title(f"{row['angle_proj']}°")
+
+        shift_yx, error, _ = phase_cross_correlation(img_pre, img_post, upsample_factor=100)
+        print(f"[{i}] Angle {row['angle_proj']}°: Drift (y, x) = {shift_yx}, error = {error}")
+
+        shifts_y.append(shift_yx[0])
+        shifts_x.append(shift_yx[1])
+
+    for j in range(len(matched), len(axes)):
+        axes[j].axis('off')
+
+    fig.suptitle("Difference: Post - Pre scans")
+    plt.tight_layout()
+    plt.show()
+
+    # --- Fit linear drift model ---
+    A = np.vstack([corr_angles_deg, np.ones(len(corr_angles_deg))]).T
+    mx, cx = np.linalg.lstsq(A, shifts_x, rcond=None)[0]
+    my, cy = np.linalg.lstsq(A, shifts_y, rcond=None)[0]
+
+    shifts_x_all = [mx * angle + cx for angle in theta_deg]
+    shifts_y_all = [my * angle + cy for angle in theta_deg]
+
+    # --- Plot fitted shift curves ---
+    plt.scatter(corr_angles_deg, shifts_x, color='blue', label="x (measured)")
+    plt.plot(theta_deg, shifts_x_all, color='blue', linestyle='--', label="x (fit)")
+    plt.scatter(corr_angles_deg, shifts_y, color='orange', label="y (measured)")
+    plt.plot(theta_deg, shifts_y_all, color='orange', linestyle='--', label="y (fit)")
+    plt.xlabel("Angle (deg)")
+    plt.ylabel("Shift (pixels)")
+    plt.legend()
+    plt.title("Fitted drift correction over angle")
+    plt.grid(True)
+    plt.show()
+
+    # --- Apply shifts to image stack ---
+    print(f"Start image alignment using {os.cpu_count()} workers")
+    img_stack = proj.as_array()
+
+    # Prepare arguments
+    args = [
+        (i, img_stack[i], shifts_x_all[i], shifts_y_all[i], output_dir, output_prefix)
+        for i in range(len(img_stack))
+    ]
+
+    # Run in parallel
+    with ProcessPoolExecutor() as executor:
+        results = list(executor.map(shift_and_save_star, args))
+
+    # Sort and rebuild the image stack
+    results.sort()  # sort by index
+    img_stack_shifted = np.stack([res[1] for res in results])
+
+    print(f"Saved aligned image stack to '{output_dir}' with prefix '{output_prefix}'.")
+    
+    return {
+        "img_stack": img_stack,
+        "shifts_x": shifts_x_all,
+        "shifts_y": shifts_y_all,
+        "fit_x": (mx, cx),
+        "fit_y": (my, cy)
+    }
