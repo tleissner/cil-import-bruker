@@ -21,7 +21,6 @@
 
 ### General imports 
 import numpy as np
-import glob
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -33,97 +32,9 @@ import imageio
 
 ### Parallel computing
 from concurrent.futures import ProcessPoolExecutor
-from functools import partial
 
-### Import all CIL components needed
-from cil.framework import AcquisitionGeometry
+from .import_utils import *
 
-
-def set_geometry(logfile,infofile=None):
-    """
-    Creates a CIL AcquisitionGeometry object for a cone-beam CT scan.
-
-    Args:
-        infofile (str): Path to the information file.
-        logfile (str): Path to the log file.
-
-    Returns:
-        AcquisitionGeometry: A geometry object representing the scan setup.
-    """
-
-    # Extract scan parameters from the log file
-    scanparams = get_scanparams(logfile)
-
-    # Get angles in degrees and radians
-    if infofile:
-        theta_deg, theta_rad = get_angles_from_infofile(infofile)
-    else: 
-        theta_deg, theta_rad = get_angles_from_logfile(scanparams)
-
-
-    # Calculate distances
-    distance_source_origin = float(scanparams['Acquisition']['object_to_source_(mm)'])
-    distance_origin_detector = float(scanparams['Acquisition']['camera_to_source_(mm)'])-distance_source_origin
-    
-    # Get detector properties
-    detector_pixel_size = float(scanparams['System']['camera_pixel_size_(um)'])/1000
-    detector_rows = int(scanparams['Acquisition']['number_of_rows'])
-    detector_cols = int(scanparams['Acquisition']['number_of_columns'])
-
-    # Create AcquisitionGeometry object
-    ag = AcquisitionGeometry.create_Cone3D(source_position=[0,-distance_source_origin,0],detector_position=[0,distance_origin_detector,0],
-                                       detector_direction_x=[1,0,0],detector_direction_y=[0,0,1]
-                                      )\
-    .set_panel(num_pixels=[detector_cols,detector_rows], pixel_size = detector_pixel_size)\
-    .set_angles(angles=theta_deg)
-
-    return ag
-
-
-
-
-def get_angles_from_logfile(scanparams):
-    """
-    Calculates angles in degrees from the information in the log file.
-
-    Args:
-        logfile (str): Path to the log file.
-
-    Returns:
-        Tuple[np.ndarray, np.ndarray]: A tuple containing two arrays:
-            - First array: Angles in degrees.
-            - Second array: Angles converted to radians.
-    """
-    angles_deg = [ i*float(scanparams['Acquisition']['rotation_step_(deg)']) for i in range(int(scanparams['Acquisition']['number_of_files'])) ]
-    return np.array(angles_deg), np.deg2rad(angles_deg)
-
-
-def get_angles_from_infofile(infofile, startangle=0):
-    """
-    Extracts angles in degrees from an information file.
-
-    Args:
-        infofile (str): Path to the information file.
-        startangle (float, optional): Starting angle in degrees (default is 0).
-
-    Returns:
-        Tuple[np.ndarray, np.ndarray]: A tuple containing two arrays:
-            - First array: Angles in degrees.
-            - Second array: Angles converted to radians.
-    """
-    
-    # Initialize the list of angles with the start angle
-    angles_deg = [startangle]
-    
-    # Read the information file
-    with open(infofile, "r") as f:
-        for line in f.readlines():
-                line = line.rstrip('\n')
-                if 'Drift compensation scan' in line:
-                        break
-                elif 'achieved angle' in line:
-                        angles_deg.append(float(line.strip().rsplit(' ',1)[-1][:-1]))
-    return np.array(angles_deg), np.deg2rad(angles_deg)
 
 
 def get_reference_angles_from_infofile(infofile, startangle=0):
@@ -153,65 +64,17 @@ def get_reference_angles_from_infofile(infofile, startangle=0):
     return np.array(angles_deg), np.deg2rad(angles_deg)
 
 
-def get_scanparams(logfile):
-    """
-    Extracts scan parameters from a log file.
-
-    Args:
-        logfile (str): Path to the log file.
-
-    Returns:
-        dict: A dictionary containing scan parameters organized by sections.
-    """
-    
-    # Initialize an empty dictionary to store scan parameters
-    scanparams = {}
-
-    # Read the log file
-    with open(logfile, "r") as f:
-        for line in f.readlines():
-                line = line.rstrip('\n')
-                if line.startswith('['):
-                        section = line[1:][:-1]
-                        scanparams[section] ={}
-                else:
-                        scanparams[section][str.split(line, '=')[0].replace(' ','_').lower()]=str.split(line, '=')[1]
-        return scanparams
-        
-
-def get_filelist(datadir,dataset_prefix,num_digits=8,extension='tif'):
-    """
-    Retrieves a sorted list of file paths matching a specific pattern.
-
-    Args:
-        datadir (str): Directory path where the files are located.
-        dataset_prefix (str): Prefix for the dataset filenames.
-        num_digits (int, optional): Number of digits in the numeric part of the filenames (default is 8).
-
-    Returns:
-        List[str]: A sorted list of file paths matching the specified pattern.
-    """
-    return sorted(glob.glob(datadir+'/'+dataset_prefix+('[0-9]' * num_digits)+'.'+extension))
-
-
-
-def rename_files(directory, old_prefix, new_prefix):
-    #Usage: bc.rename_files('./samples/02-switch-large', '001', '001_')
-    for filename in os.listdir(directory):
-        if filename.startswith(old_prefix):
-            new_name = filename.replace(old_prefix, new_prefix, 1)
-            os.rename(os.path.join(directory, filename), os.path.join(directory, new_name))
-
-
 ### Thermal drift alignment functions
 def shift_and_save_star(args):
     return shift_and_save(*args)
+
 
 def shift_and_save(index, image, shift_x, shift_y, output_dir, output_prefix):
     shifted = shift(image, (shift_y, shift_x))
     filename = os.path.join(output_dir, f"{output_prefix}{index:04d}.tiff")
     imageio.imwrite(filename, shifted.astype(np.uint16))
     return index, shifted  # To reconstruct the new stack in order
+
 
 def align_projection_stack(
     proj,                          # Projection stack object with .as_array() and .fill()
@@ -306,7 +169,7 @@ def align_projection_stack(
 
     # Sort and rebuild the image stack
     results.sort()  # sort by index
-    img_stack_shifted = np.stack([res[1] for res in results])
+    img_stack = np.stack([res[1] for res in results])
 
     print(f"Saved aligned image stack to '{output_dir}' with prefix '{output_prefix}'.")
     
@@ -317,3 +180,5 @@ def align_projection_stack(
         "fit_x": (mx, cx),
         "fit_y": (my, cy)
     }
+
+
